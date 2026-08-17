@@ -1,0 +1,12 @@
+/etc/ssh/
+/etc/netplan/
+/etc/sysconfig/network-scripts/
+/etc/modprobe.d/
+/var/spool/cron/
+/var/spool/cron/crontabs/
+/etc/profile.d/
+/etc/sysctl.d/
+/etc/ld.so.conf.d/
+/etc/modules-load.d/
+/etc/udev/rules.d/
+/usr/share/cracklib/

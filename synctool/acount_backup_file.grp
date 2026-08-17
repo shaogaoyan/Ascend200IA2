@@ -1,0 +1,7 @@
+/etc/shadow
+/etc/passwd
+/etc/group
+/etc/subgid
+/etc/subuid
+/etc/gshadow
+/etc/security/opasswd
