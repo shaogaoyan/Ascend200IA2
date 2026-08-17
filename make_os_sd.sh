@@ -144,9 +144,9 @@ function checkChipType()
         #40M 2M
         DTB_OFFSET=81920
         DTB_SIZE=4096
-        #44M 2M
+        #44M 4M
         TEE_OFFSET=90112
-        TEE_SIZE=4096
+        TEE_SIZE=8192
         #48M 80M
         INITRD_OFFSET=98304
         INITRD_SIZE=163840
