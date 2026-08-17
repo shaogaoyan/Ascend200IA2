@@ -62,6 +62,18 @@ FAST_BOOT_FLAG="off"
 FLAG_310B="off"
 DRIVER_PACKAGE=$(ls Ascend*310*driver*.*)
 
+# **********************custom rootfs****************************************
+# support using rootfs_Custom/rootfs.tar.bz2 to make image instead of iso
+CUSTOM_ROOTFS_FLAG="off"
+CUSTOM_ROOTFS=""
+if [ -f "${ISO_FILE_DIR}/${ISO_FILE}" ] && [[ ${ISO_FILE} =~ "rootfs.tar.bz2" ]];then
+    CUSTOM_ROOTFS="${ISO_FILE_DIR}/${ISO_FILE}"
+    CUSTOM_ROOTFS_FLAG="on"
+elif [ -f "${ScriptPath}rootfs_Custom/rootfs.tar.bz2" ];then
+    CUSTOM_ROOTFS="${ScriptPath}rootfs_Custom/rootfs.tar.bz2"
+    CUSTOM_ROOTFS_FLAG="on"
+fi
+
 if [ x"CARD_TYPE" == x"" ];then
     CARD_TYPE="SD"
 fi
@@ -146,7 +158,7 @@ function checkChipType()
         DTB_SIZE=4096
         #44M 4M
         TEE_OFFSET=90112
-        TEE_SIZE=8192
+        TEE_SIZE=8190
         #48M 80M
         INITRD_OFFSET=98304
         INITRD_SIZE=163840
@@ -281,6 +293,15 @@ function checkIps()
 # ******************************************************************************
 function checkPackage()
 {
+    if [ "$CUSTOM_ROOTFS_FLAG"x = "on"x ];then
+        # custom rootfs: os type will be detected from the extracted rootfs
+        PACKAGE_VERSION=""
+        ISO_SOURCE_VERSION=""
+        OS_TYPE=""
+        echo "Use custom rootfs: ${CUSTOM_ROOTFS}"
+        return 0
+    fi
+
     if [[ $ISO_FILE =~ "22.04" ]];then
         PACKAGE_VERSION="22.04"
         OS_TYPE="Ubuntu"
@@ -431,6 +452,30 @@ function ubuntufsExtract()
     rootfs_openeuler2203="Sample-root-filesystem-soc_openEuler-22.03-LTS*-aarch64.img"
     rootfs_ubuntu2204="Sample-root-filesystem-soc_ubuntu-22.04-aarch64.img"
     mkdir ${TMPDIR_DATE}
+
+    if [ "$CUSTOM_ROOTFS_FLAG"x = "on"x ];then
+        cd ${LogPath}
+        mkdir -p squashfs-root
+        cd squashfs-root
+        #if the tarball has a single top-level dir(such as rootfs/), strip it
+        top_levels=$(tar tjf ${CUSTOM_ROOTFS} 2>/dev/null | awk -F/ '{print $1}' | sort -u | wc -l)
+        if [ "$top_levels" -eq 1 ];then
+            strip_opt="--strip-components=1"
+        else
+            strip_opt=""
+        fi
+        echo "Extract custom rootfs: ${CUSTOM_ROOTFS}"
+        tar xjf ${CUSTOM_ROOTFS} ${strip_opt}
+        if [[ $? -ne 0 ]];then
+            echo "Failed: extract custom rootfs fail!"
+            return 1;
+        fi
+        cd -
+        detectOSTypeFromRootfs
+        cd ${ScriptPath}
+        return 0
+    fi
+
     mount -o loop ${ISO_FILE_DIR}/${ISO_FILE} ${TMPDIR_DATE}
 
     if [[ $ISO_FILE =~ "ubuntu-22.04" ]];then
@@ -488,6 +533,77 @@ function ubuntufsExtract()
 }
 # end
 
+# *****************detect os type from custom rootfs***************************
+# Description:  detect OS type from the extracted custom rootfs
+# ******************************************************************************
+function detectOSTypeFromRootfs()
+{
+    local osrelease="${LogPath}squashfs-root/etc/os-release"
+    OS_TYPE=""
+    if [ -f "${osrelease}" ];then
+        if grep -qi "ubuntu" "${osrelease}";then
+            OS_TYPE="Ubuntu"
+        elif grep -qi "openEuler" "${osrelease}";then
+            OS_TYPE="openEuler"
+        elif grep -qi "euleros" "${osrelease}";then
+            OS_TYPE="EulerOS"
+        elif grep -qi "debian" "${osrelease}";then
+            OS_TYPE="Debian"
+        fi
+    fi
+    if [ -z "${OS_TYPE}" ];then
+        OS_TYPE="Ubuntu"
+        echo "Warning: can not detect OS type from custom rootfs, use Ubuntu by default."
+    fi
+
+    #set network config by os type
+    if [ "$OS_TYPE"x = "Ubuntu"x ];then
+        NETWORK_CFG_FILE="/etc/netplan/01-netcfg.yaml"
+        NETWORK_CONFIG="
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    eth0:
+      dhcp4: no
+      addresses: [${NETWORK_CARD_DEFAULT_IP}/${NETWORK_CIDR_PREFIX}]
+      gateway4: ${NETWORK_DEFAULT_GATEWAY}
+
+    usb0:
+      dhcp4: no
+      addresses: [${USB_CARD_DEFAULT_IP}/24]
+      gateway4: ${USB_CARD_GATEWAY}
+"
+        NETWORK_CONFIG_ETH1="    eth1:
+      dhcp4: no
+      addresses: [192.168.3.111/24]
+"
+    else
+        NETWORK_CFG_FILE="/etc/network/interfaces"
+        NETWORK_CONFIG="source /etc/network/interfaces.d/*
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet static
+address ${NETWORK_CARD_DEFAULT_IP}
+netmask ${NETWORK_DEFAULT_NETMASK}
+gateway ${NETWORK_DEFAULT_GATEWAY}
+
+auto usb0
+iface usb0 inet static
+address ${USB_CARD_DEFAULT_IP}
+netmask ${USB_CARD_GATEWAY}
+"
+        NETWORK_CONFIG_ETH1="auto eth1
+iface eth1 inet static
+address 192.168.3.111
+netmask 255.255.255.0
+"
+    fi
+    echo "Custom rootfs OS_TYPE: ${OS_TYPE}, NETWORK_CFG_FILE: ${NETWORK_CFG_FILE}"
+    return 0
+}
 
 # *****************configure syslog and kernlog**************************************
 # Description:  configure syslog and kernlog
@@ -666,7 +782,9 @@ function configUbuntu()
 {
     # 1. configure image sources
     mkdir -p ${LogPath}squashfs-root/cdtmp
-    mount -o bind ${TMPDIR_DATE} ${LogPath}squashfs-root/cdtmp
+    if [ "$CUSTOM_ROOTFS_FLAG"x != "on"x ];then
+        mount -o bind ${TMPDIR_DATE} ${LogPath}squashfs-root/cdtmp
+    fi
 
     install_list=""
     if [ $DEV_NAME == "vdisk" ];then
@@ -684,11 +802,17 @@ sed -i "11,15d" $NETWORK_CFG_FILE
 "
     fi
 
-    echo "
-#!/bin/bash
-${input_echo}
-mkdir /lib64
-${input_echo_1911}
+    if [ "$CUSTOM_ROOTFS_FLAG"x = "on"x ];then
+        #custom rootfs: packages are already built in and no local apt source, skip apt install
+        apt_install_echo="
+# 1. custom rootfs: skip apt install
+echo \"make_sd_process: 5%\"
+echo \"make_sd_process: 10%\"
+echo \"make_sd_process: 20%\"
+echo \"make_sd_process: 25%\"
+"
+    else
+        apt_install_echo="
 # 1. apt install deb
 mv /etc/apt/sources.list /etc/apt/sources.list.bak
 touch /etc/apt/sources.list
@@ -728,7 +852,15 @@ ${install_list}
 echo \"make_sd_process: 25%\"
 
 mv /etc/apt/sources.list.bak /etc/apt/sources.list
+"
+    fi
 
+    echo "
+#!/bin/bash
+${input_echo}
+mkdir /lib64
+${input_echo_1911}
+${apt_install_echo}
 # 2. set username
 ${user_add_echo}
 
@@ -820,7 +952,9 @@ exit
     #configure syslog and kern log
     configure_syslog_and_kernlog
 
-    umount ${LogPath}squashfs-root/cdtmp
+    if [ "$CUSTOM_ROOTFS_FLAG"x != "on"x ];then
+        umount ${LogPath}squashfs-root/cdtmp
+    fi
     rm -rf ${LogPath}squashfs-root/cdtmp
     rm ${LogPath}squashfs-root/chroot_install.sh
     return 0
@@ -1082,6 +1216,17 @@ exit
 
 function configFilesystem()
 {
+    if [ "$CUSTOM_ROOTFS_FLAG"x = "on"x ];then
+        #custom rootfs: run the ubuntu flow as much as possible
+        configUbuntu
+        if [ $? -ne 0 ];then
+            echo "Failed: config custom rootfs fail!"
+            return 1
+        fi
+
+        return 0
+    fi
+
     if [[ $ISO_FILE =~ "ubuntu" ]];then
         configUbuntu
         if [ $? -ne 0 ];then
@@ -1938,6 +2083,10 @@ function preInstallMinirc310BPackage()
         echo "Failed: Copy firmware to filesystem failed!"
         return 1
     fi
+    # keep the rootfs /fw/dt.img consistent with the known-good boot slot dt.img
+    if [ -f "${ScriptPath}firmware_fix/dt.img" ];then
+        cp -f ${ScriptPath}firmware_fix/dt.img ${LogPath}squashfs-root/fw/dt.img
+    fi
     echo "pre install drvier finished"
     echo "make_sd_process: 85%"
     if [[ ${arch} =~ "x86" ]];then
@@ -2188,7 +2337,15 @@ function writeStructInfo()
 
     dd if=${ScriptPath}parttion_head_info of=${DEST_DEV} seek=$[HEAD_OFFSET] count=2 bs=512
     dd if=${ScriptPath}parttion_head_info of=${DEST_DEV} seek=$[HEAD_BAK_OFFSET]  count=2 bs=512
-    dd if=${ScriptPath}boot_image_info of=${DEST_DEV} seek=$[BOOTIMGDIR_OFFSET] count=8 bs=512
+
+    # boot_image_info: prefer the known-good copy from firmware_fix/
+    # (25.5.0 package dt.img is incompatible with BIOS 0.23.00, see Debian卡启动卡死排查与修复记录.md)
+    BOOT_INFO_SRC="${ScriptPath}boot_image_info"
+    if [ -f "${ScriptPath}firmware_fix/boot_image_info" ];then
+        BOOT_INFO_SRC="${ScriptPath}firmware_fix/boot_image_info"
+        echo "Use known-good boot_image_info from firmware_fix/ (dtb size 0x95100, BIOS 0.23.00 compatible)"
+    fi
+    dd if=${BOOT_INFO_SRC} of=${DEST_DEV} seek=$[BOOTIMGDIR_OFFSET] count=8 bs=512
 }
 # ************************writeComponents**************************************
 # Description:  write components main/backup
@@ -2247,7 +2404,14 @@ function write310BComponents()
         echo "failed: $OF_DIR Image"
         return 1
     fi
-    dd if=${FWM_DIR}dt.img of=${DEST_DEV} count=$DTB_SIZE seek=$[OF_DIR+DTB_OFFSET] bs=$sectorSize
+    # dt.img: prefer the known-good image from firmware_fix/
+    # (25.5.0 package dt.img hangs on BIOS 0.23.00, see Debian卡启动卡死排查与修复记录.md)
+    DTB_SRC="${FWM_DIR}dt.img"
+    if [ -f "${ScriptPath}firmware_fix/dt.img" ];then
+        DTB_SRC="${ScriptPath}firmware_fix/dt.img"
+        echo "Use known-good dt.img from firmware_fix/ (BIOS 0.23.00 compatible)"
+    fi
+    dd if=${DTB_SRC} of=${DEST_DEV} count=$DTB_SIZE seek=$[OF_DIR+DTB_OFFSET] bs=$sectorSize
     if [ $? -ne 0 ];then
         echo "failed: $OF_DIR dt"
         return 1

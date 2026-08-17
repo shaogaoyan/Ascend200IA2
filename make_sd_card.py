@@ -47,6 +47,8 @@ COMMAND_RECOVER = "recover"
 CARD_TYPE_LIST = ["M.2", "eMMC", "USB", "SD", "NVME"]
 SSD_CARD_TYPE = ["M.2", "NVME"]
 
+CUSTOM_ROOTFS_PATH = os.path.join(CURRENT_PATH, "rootfs_Custom", "rootfs.tar.bz2")
+
 def execute(cmd, timeout=3600, cwd=None):
     '''execute os command'''
     is_linux = platform.system() == 'Linux'
@@ -151,7 +153,30 @@ def check_minirc_run_package():
         print("[ERROR]Too many driver packages, please delete redundant packages.")
         return False
 
+    check_firmware_fix()
+
     return True
+
+
+def check_custom_rootfs():
+    if os.path.exists(CUSTOM_ROOTFS_PATH):
+        return True, CUSTOM_ROOTFS_PATH
+    return False, ""
+
+
+def check_firmware_fix():
+    """check known-good dt.img/boot_image_info are present for the 310B dtb fix.
+    The 25.5.0 driver package dt.img hangs on BIOS 0.23.00; firmware_fix/
+    carries the known-good pair that boots (see Debian卡启动卡死排查与修复记录.md)."""
+    fix_dt = os.path.join(CURRENT_PATH, "firmware_fix", "dt.img")
+    fix_bi = os.path.join(CURRENT_PATH, "firmware_fix", "boot_image_info")
+    if os.path.isfile(fix_dt) and os.path.isfile(fix_bi):
+        print("[INFO] firmware_fix/ found: make_os_sd.sh will write the known-good dt.img "
+              "and boot_image_info (BIOS 0.23.00 compatible).")
+        return True
+    print("[WARN] firmware_fix/ not found: dt.img/boot_image_info will be taken from the "
+          "driver package. A 25.5.0 card may hang on BIOS 0.23.00.")
+    return False
 
 
 def process_recover_installation():
@@ -280,16 +305,23 @@ def process_local_installation(dev_name, card_type):
         print("[ERROR] Can not find make_os_sd.sh in current path")
         return False
 
-    ret, paths = execute(
-        "find {path} -name \"ubuntu*server*arm*.iso\" -o -name \"*Euler*aarch64*.iso\"".format(path=CURRENT_PATH))
-    if not ret or not paths[0]:
-        print("[ERROR] Can not find iso package in current path")
-        return False
-    if len(paths) > 1:
-        print("[ERROR] Too many iso packages, please delete redundant packages.")
-        return False
-    ubuntu_path = paths[0]
-    ubuntu_file_name = os.path.basename(ubuntu_path)
+    # use rootfs_Custom/rootfs.tar.bz2 to make image if it exists
+    custom_rootfs_found, custom_rootfs_path = check_custom_rootfs()
+    if custom_rootfs_found:
+        ubuntu_path = custom_rootfs_path
+        ubuntu_file_name = os.path.relpath(custom_rootfs_path, CURRENT_PATH)
+        print("Find custom rootfs: {path}".format(path=custom_rootfs_path))
+    else:
+        ret, paths = execute(
+            "find {path} -name \"ubuntu*server*arm*.iso\" -o -name \"*Euler*aarch64*.iso\"".format(path=CURRENT_PATH))
+        if not ret or not paths[0]:
+            print("[ERROR] Can not find iso package in current path")
+            return False
+        if len(paths) > 1:
+            print("[ERROR] Too many iso packages, please delete redundant packages.")
+            return False
+        ubuntu_path = paths[0]
+        ubuntu_file_name = os.path.basename(ubuntu_path)
 
     if card_type in CARD_TYPE_LIST:
         device_types = " or ".join([
